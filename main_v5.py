@@ -10,6 +10,56 @@ from matplotlib import animation
 import matplotlib.pyplot as plt
 import gym
 from time import time
+import csv
+
+
+def calculate_ones(tensor_list):
+    """计算每个向量中1的数量并返回每个向量的1的数量列表"""
+    ones_count = [tensor.sum().item() for tensor in tensor_list]
+    return ones_count
+
+
+# 定义一个函数来追加数据到CSV文件
+def append_to_csv(filename, total_cost, group1_cost, group2_cost):
+    # 打开文件，追加模式
+    with open(filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+
+        # 如果是文件第一次写入，可以选择写入头部信息（可选）
+        # writer.writerow(["Total Cost", "Group 1 Cost", "Group 2 Cost"])
+
+        # 写入数据
+        writer.writerow([total_cost, group1_cost, group2_cost])
+
+def calculate_average_bitrate(tensor_list):
+    """计算每个向量的平均bitrate，假设每个用户的带宽为3"""
+    average_bitrate = [3.0 / tensor.sum().item() if tensor.sum().item() > 0 else 0 for tensor in tensor_list]
+    return average_bitrate
+
+
+def calculate_bandwidth_cost(results):
+    """计算总带宽开销"""
+    num_dimensions = results[0].numel()  # 假设所有向量的维度数相同
+    average_bitrate = calculate_average_bitrate(results)
+
+    # 初始化总带宽开销为0
+    total_cost = 0
+
+    # 遍历每个维度
+    for i in range(num_dimensions):
+        dimension_values = set()  # 存储该维度上所有非零bitrate值
+
+        # 遍历每个用户的结果
+        for j, tensor in enumerate(results):
+            if tensor[0][i].item() == 1:  # 如果该维度上的值为1
+                bitrate = average_bitrate[j]
+                if bitrate > 0:  # 如果bitrate为正，添加到集合中
+                    dimension_values.add(bitrate)
+
+        # 计算并累加该维度上的带宽开销
+        total_cost += sum(dimension_values)
+
+    return total_cost
 
 
 def display_frames_as_gif(policy, frames):
@@ -65,12 +115,20 @@ def tuple_of_tensors_to_tensor(tuple_of_tensors):
 
 def construct_negative_graph(graph, k, etype):
     utype, _, vtype = etype
+
+    # Ensure operations are performed on the same device as the input graph
+    device = graph.device
+
     src, dst = graph.edges(etype=etype)
-    neg_src = src.repeat_interleave(k).to('cuda:0')
-    neg_dst = th.randint(0, graph.num_nodes(vtype), (len(src) * k,)).to('cuda:0')
+    # Move src to the intended device before repeating
+    neg_src = src.repeat_interleave(k).to(device)
+    # Generate negative destinations and move to the same device
+    neg_dst = th.randint(0, graph.num_nodes(vtype), (len(src) * k,)).to(device)
+
     return dgl.heterograph(
         {etype: (neg_src, neg_dst)},
-        num_nodes_dict={ntype: graph.num_nodes(ntype) for ntype in graph.ntypes})
+        num_nodes_dict={ntype: graph.num_nodes(ntype) for ntype in graph.ntypes},
+        device=device)  # Ensure the new graph is created on the same device
 
 
 def compute_loss(pos_score, neg_score):
@@ -82,6 +140,23 @@ def compute_loss(pos_score, neg_score):
 if __name__ == '__main__':
 
     args = get_args()     # 从 arguments.py 获取配置参数
+
+    fileList = [" ", "1-1-Conan Gore Fly", "1-2-Front", "1-3-Help", "1-4-Conan Weird Al",
+                "1-5-Tahiti Surf", "1-6-Falluja", "1-7-Cooking Battle", "1-8-Football",
+                "1-9-Rhinos", "2-1-Korean", "2-2-VoiceToy", "2-3-RioVR", "2-4-FemaleBasketball",
+                "2-5-Fighting", "2-6-Anitta", "2-7-TFBoy", "2-8-Reloaded"]
+
+    # 调用函数，将数据追加到CSV文件中
+    filename = str(args.videoId) + '_' + str(args.trainNum) + '_bandwidth_costs_' + fileList[args.videoId] + '.csv'
+
+    with open(filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+
+        # 如果是文件第一次写入，可以选择写入头部信息（可选）
+        # writer.writerow(["Total Cost", "Group 1 Cost", "Group 2 Cost"])
+
+        # 写入数据
+        writer.writerow(['cloud server', "edge server 1", "edge server 2"])
 
     if args.cuda and th.cuda.is_available():
         device = th.device('cuda:0')
@@ -107,7 +182,7 @@ if __name__ == '__main__':
     totalTime = videoUsers[0].get_time()
 
     # 主循环
-    env = gym.make('MyEnv-v1')
+    # env = gym.make('MyEnv-v1')
     frames = []
     his_vec = []
     thredhold = args.thred * th.ones(args.testNum + args.trainNum)
@@ -208,6 +283,11 @@ if __name__ == '__main__':
         # user_feats_en = encoder(user_feats)
         # tile_feats_en = encoder(tile_feats)
 
+        # 随机打乱用户编号
+        user_indices = np.arange(totalUser)
+        np.random.shuffle(user_indices)
+
+        results = []
         for index1 in range(totalUser):
 
             if sum(labels[index1]) == 0:
@@ -250,11 +330,12 @@ if __name__ == '__main__':
 
             result = model.predict(user_embeddings.reshape(1, k), tile_embeddings, thredhold[index1])
 
-            if args.visId == index1:
-                env.setPrediction(result[0, :])
-                env.setFov(view_point)
-                frames.append(env.render(mode='rgb_array'))
-                env.render()
+            results.append(result)
+            # if args.visId == index1:
+            #     env.setPrediction(result[0, :])
+            #     env.setFov(view_point)
+            #     frames.append(env.render(mode='rgb_array'))
+            #     env.render()
 
             for index2, value2 in enumerate(labels[index1]):
                 if value2 == 1 and result[0, index2] == 1:   # result[index1, index2]
@@ -303,4 +384,26 @@ if __name__ == '__main__':
             sortedValues = [str(accuracy), str(precision), str(recall), str(avePreTile), str(aveTime)]
             videoUsers[index1].allWriter.writerCSVA(sortedValues)
 
-    display_frames_as_gif(args.policy, frames)
+        # 对两组用户分别进行预测
+        # 分成两组（这里简单地分为前半部分和后半部分）
+        mid_point = totalUser // 2
+        group1_indices = user_indices[:mid_point]
+        group2_indices = user_indices[mid_point:]
+
+        # 假设 results, group1_indices, 和 group2_indices 已经定义
+        results_group1 = [results[i] for i in group1_indices if i < len(results)]
+        results_group2 = [results[i] for i in group2_indices if i < len(results)]
+
+        # 计算总带宽开销
+        total_cost = calculate_bandwidth_cost(results)
+        group1_cost = calculate_bandwidth_cost(results_group1)
+        group2_cost = calculate_bandwidth_cost(results_group2)
+        print("总带宽开销:", total_cost)
+        print("组 1 带宽开销:", group1_cost)
+        print("组 2 带宽开销:", group2_cost)
+
+        append_to_csv(filename, total_cost, group1_cost, group2_cost)
+
+    # 现在 final_results 包含了按用户原始编号顺序的预测结果
+
+    # display_frames_as_gif(args.policy, frames)
